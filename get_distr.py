@@ -283,6 +283,13 @@ def process_root_file(input_file_name):
             else:
                 print(f"⚠️ Branch {full_name} not found. Skipped.")
 
+    # Verifica coerenza numero totale di tracce
+    n_tracks_from_mult = sum(
+        i * h_trk_mult.GetBinContent(i + 1) for i in range(int(h_trk_mult.GetNbinsX()))
+    )
+    print("Total tracks (from multiplicity hist):", n_tracks_from_mult)
+    print("Total tracks (from x0 histogram):", counts["x0"])
+
     # === DISEGNO E SALVATAGGIO ===
     c.Print(
         return_output_name(output_directory, input_file_name, "_distributions.pdf")
@@ -323,7 +330,7 @@ def process_root_file(input_file_name):
         # Titolo
         base_hist = h1 if h1 else h2
         if base_hist:
-            base_hist.SetTitle(f"Confronto: {b1} vs {b2};{xlabel};Densità normalizzata")
+            base_hist.SetTitle(f"Confronto: {b1} vs {b2};{xlabel};Normalised counts")
 
         # Disegno
         c.cd()
