@@ -4,6 +4,7 @@ import awkward as ak
 import math
 import argparse
 import os
+import numpy as np
 
 
 def safe_first(arr):
@@ -16,12 +17,22 @@ def extract_selected_info(input_file, txt_output):
         # ✅ Correct tree name
         tree = f["L2"]
 
-        # --- Apply your existing mask logic ---
+        # --- Read trigger flag and build trig mask ---
+        trig_conf_flag = tree["L2Event/trig_conf_flag[6]"].array(library="np")
+        if getattr(trig_conf_flag, "ndim", None) == 2:
+            trig_mask = trig_conf_flag[:, 1] == 1
+            print("Using trigger mask (ndim=2)")
+        else:
+            trig_mask = np.array([evt[1] for evt in trig_conf_flag]) == 1
+            print("Using trigger mask (object-array)")
+
+        # --- Apply your selection mask ---
         x0 = tree["L2Event/x0"].array(library="ak")
         x0_m2 = tree["L2Event/x0_m2"].array(library="ak")
-        mask = (ak.num(x0) == 1) & (ak.num(x0_m2) == 0)
+        base_mask = (ak.num(x0) == 1) & (ak.num(x0_m2) == 0)
+        mask = base_mask & trig_mask
 
-        # --- Load only required branches ---
+        # --- Load required branches ---
         branches = [
             "L2Event/x0",
             "L2Event/y0",
@@ -36,7 +47,19 @@ def extract_selected_info(input_file, txt_output):
         arrays = tree.arrays(branches, library="ak")
         arrays = arrays[mask]
 
-    print(f"✅ Selected {len(arrays)} events matching criteria.")
+    print(f"✅ Selected {len(arrays)} events matching criteria (mask + trigger).")
+
+    # --- Prepare ROOT histograms ---
+    h_ncls = ROOT.TH1F(
+        "h_ncls", "Number of Clusters per Event;N_{cls};Entries", 10, 0, 10
+    )
+    h_samez = ROOT.TH1F(
+        "h_samez", "Clusters with same Z per Event;Count;Entries", 10, 0, 10
+    )
+
+    # --- Counters ---
+    n_bad_meanx = 0
+    n_theta_high = 0
 
     # --- Write output to text ---
     print(f"📝 Writing detailed event dump to {txt_output}")
@@ -50,13 +73,7 @@ def extract_selected_info(input_file, txt_output):
             theta_val = safe_first(evt["L2Event/theta"])
             phi_val = safe_first(evt["L2Event/phi"])
 
-            f.write(f"Event {i}\n")
-            f.write(
-                f"  x0={x0_val:.5f}, y0={y0_val:.5f}, "
-                f"theta={theta_val:.5f}, phi={phi_val:.5f}\n"
-            )
-
-            # --- Build array of cluster structs (array of dicts) ---
+            # --- Build array of cluster structs ---
             cls_structs = [
                 {
                     "mean_x": float(mx),
@@ -72,7 +89,46 @@ def extract_selected_info(input_file, txt_output):
                 )
             ]
 
-            f.write(f"  n_cls={len(cls_structs)}\n")
+            n_cls = len(cls_structs)
+            h_ncls.Fill(n_cls)
+
+            # --- Check for clusters with the same z ---
+            z_values = [c["mean_z"] for c in cls_structs]
+            same_z_count = len(z_values) - len(set(z_values))
+            h_samez.Fill(same_z_count)
+
+            # --- Conditions ---
+            has_bad_meanx = any(c["mean_x"] == -999 for c in cls_structs)
+            bad_ncls = n_cls != 2
+            bad_samez = same_z_count >= 1
+            bad_theta = theta_val > 72
+
+            if has_bad_meanx:
+                n_bad_meanx += 1
+            if bad_theta:
+                n_theta_high += 1
+
+            # --- Write to text file ---
+            f.write(f"Event {i}\n")
+            f.write(
+                f"  x0={x0_val:.5f}, y0={y0_val:.5f}, "
+                f"theta={theta_val:.5f}, phi={phi_val:.5f}\n"
+            )
+            f.write(f"  n_cls={n_cls}, same_z_clusters={same_z_count}\n")
+
+            # Mark problems
+            if has_bad_meanx or bad_ncls or bad_samez or bad_theta:
+                f.write("  ⚠️ Issues:\n")
+                if has_bad_meanx:
+                    f.write("    - mean_x = -999\n")
+                if bad_ncls:
+                    f.write("    - n_cls != 2\n")
+                if bad_samez:
+                    f.write("    - Two or more clusters with same z\n")
+                if bad_theta:
+                    f.write("    - theta > 72°\n")
+
+            # Cluster list
             for j, c in enumerate(cls_structs):
                 f.write(
                     f"    cls[{j}] -> mean_x={c['mean_x']:.5f}, "
@@ -81,7 +137,7 @@ def extract_selected_info(input_file, txt_output):
                     f"size={c['size']}\n"
                 )
 
-            # --- Special handling: 3 clusters ---
+            # --- If 3 clusters, compute delta quantities ---
             if len(cls_structs) == 3:
                 for i1, i2 in [(0, 1), (1, 2)]:
                     dx = cls_structs[i2]["mean_x"] - cls_structs[i1]["mean_x"]
@@ -96,19 +152,28 @@ def extract_selected_info(input_file, txt_output):
                         f"r={r:.5f}, phi={phi:.5f}, theta={theta:.5f}\n"
                     )
 
-            elif len(cls_structs) == 4:
-                f.write("    ⚠️ 4 clusters found — special case.\n")
-
             f.write("\n")
 
-    print("✅ Done. Events successfully written.\n")
+    # --- Save histograms ---
+    root_out = os.path.splitext(txt_output)[0] + ".root"
+    print(f"💾 Saving histograms to {root_out}")
+    root_file = ROOT.TFile(root_out, "RECREATE")
+    h_ncls.Write()
+    h_samez.Write()
+    root_file.Close()
+
+    # --- Print summary ---
+    print("📊 Summary:")
+    print(f"  Tracks with mean_x = -999: {n_bad_meanx}")
+    print(f"  Tracks with theta > 72°: {n_theta_high}")
+    print("✅ Done.\n")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Extract events with 1 x0 and 0 x0_m2, print detailed info."
+        description="Extract events with 1 x0, 0 x0_m2, apply trigger mask, and dump info."
     )
-    parser.add_argument("input", help="Input ROOT file")
+    parser.add_argument("--input", required=True, help="Input ROOT file path")
     parser.add_argument("--txt", required=True, help="Output TXT file path")
 
     args = parser.parse_args()
