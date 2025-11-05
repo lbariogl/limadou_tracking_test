@@ -11,7 +11,7 @@ def safe_first(arr):
     return float(arr[0]) if len(arr) > 0 else float("nan")
 
 
-def extract_selected_info(input_file, txt_output):
+def extract_selected_info(input_file, output_dir):
     print(f"🔍 Opening ROOT file: {input_file}")
     with uproot.open(input_file) as f:
         tree = f["L2"]
@@ -46,6 +46,12 @@ def extract_selected_info(input_file, txt_output):
 
     print(f"✅ Selected {len(arrays)} events (mask + trigger).")
 
+    # --- Prepare output paths ---
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = os.path.splitext(os.path.basename(input_file))[0]
+    txt_output = os.path.join(output_dir, f"{base_name}_selected.txt")
+    root_output = os.path.join(output_dir, f"{base_name}_selected.root")
+
     # --- Histograms ---
     h_ncls = ROOT.TH1F(
         "h_ncls", "Number of Clusters per Event;N_{cls};Entries", 16, -0.5, 15.5
@@ -57,11 +63,10 @@ def extract_selected_info(input_file, txt_output):
     # --- Counters ---
     n_bad_meanx = 0
     n_theta_high = 0
-    n_same_z_tracks = 0  # NEW COUNTER
+    n_same_z_tracks = 0
 
     # --- Output ---
     print(f"📝 Writing detailed event dump to {txt_output}")
-    os.makedirs(os.path.dirname(txt_output), exist_ok=True)
 
     with open(txt_output, "w") as f:
         for i, evt in enumerate(arrays):
@@ -147,9 +152,8 @@ def extract_selected_info(input_file, txt_output):
             f.write("\n")
 
     # --- Save histograms ---
-    root_out = os.path.splitext(txt_output)[0] + ".root"
-    print(f"💾 Saving histograms to {root_out}")
-    root_file = ROOT.TFile(root_out, "RECREATE")
+    print(f"💾 Saving histograms to {root_output}")
+    root_file = ROOT.TFile(root_output, "RECREATE")
     h_ncls.Write()
     h_samez.Write()
     root_file.Close()
@@ -167,7 +171,12 @@ if __name__ == "__main__":
         description="Extract events with duplicated z clusters and trigger mask."
     )
     parser.add_argument("--input", required=True, help="Input ROOT file path")
-    parser.add_argument("--txt", required=True, help="Output TXT file path")
+    parser.add_argument(
+        "--output-dir",
+        required=False,
+        default="./output",
+        help="Directory to save the output files (will be created if missing)",
+    )
 
     args = parser.parse_args()
-    extract_selected_info(args.input, args.txt)
+    extract_selected_info(args.input, args.output_dir)
