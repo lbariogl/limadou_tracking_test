@@ -225,26 +225,52 @@ def handle_two_cluster_track(cls_structs, theta, phi, dist_z):
 # Event-level analysis
 # ============================================================
 def analyze_event(evt):
-    """Compute metrics and flags for a single event."""
+    """Compute key metrics, flags, and acceptance for one event."""
     x0_val = safe_first(evt["L2Event/x0"])
     y0_val = safe_first(evt["L2Event/y0"])
     theta_val = safe_first(evt["L2Event/theta"])
     phi_val = safe_first(evt["L2Event/phi"])
 
+    # Build cluster structures including residuals and size
     cls_structs = [
-        {"mean_x": float(mx), "mean_y": float(my), "mean_z": float(mz)}
-        for mx, my, mz in zip(
+        {
+            "mean_x": float(mx),
+            "mean_y": float(my),
+            "mean_z": float(mz),
+            "size": int(sz),
+            "res_x": float(rx),
+            "res_y": float(ry),
+        }
+        for mx, my, mz, sz, rx, ry in zip(
             evt["L2Event/cls_mean_x"],
             evt["L2Event/cls_mean_y"],
             evt["L2Event/cls_mean_z"],
+            evt["L2Event/cls_size"],
+            evt["L2Event/cls_res_x"],
+            evt["L2Event/cls_res_y"],
         )
     ]
 
     n_cls = len(cls_structs)
-    in_acc = False
+    z_values = [c["mean_z"] for c in cls_structs]
+    same_z_count = len(z_values) - len(set(z_values))
+
+    has_bad_meanx = any(c["mean_x"] == -999 for c in cls_structs)
+    bad_ncls = n_cls != 2
+    bad_theta = theta_val > 72
+
+    issues = {
+        "mean_x": has_bad_meanx,
+        "n_cls": bad_ncls,
+        "theta": bad_theta,
+        "same_z_count": same_z_count,
+    }
+
     hit_tr = False
+    in_acc = False
 
     if n_cls == 2:
+        # Compute acceptance and TR hit for 2-cluster tracks
         result = handle_two_cluster_track(
             cls_structs, math.radians(theta_val), math.radians(phi_val), dist_z=3.5
         )
@@ -252,11 +278,22 @@ def analyze_event(evt):
             in_acc = result["in_acceptance"]
             hit_tr = result["hit_TR"]
     else:
+        # For other tracks, only check TR hit
         hit_tr = track_hit_TR(
             x0_val, y0_val, math.radians(theta_val), math.radians(phi_val)
         )
 
-    return x0_val, y0_val, theta_val, phi_val, n_cls, hit_tr, in_acc
+    return (
+        x0_val,
+        y0_val,
+        theta_val,
+        phi_val,
+        cls_structs,
+        n_cls,
+        issues,
+        hit_tr,
+        in_acc,
+    )
 
 
 # ============================================================
@@ -276,9 +313,17 @@ def write_txt_dump(
     print(f"📝 Writing detailed event dump to {txt_output}")
     with open(txt_output, "w") as f:
         for i, evt in enumerate(arrays):
-            x0_val, y0_val, theta_val, phi_val, n_cls, hit_tr, in_acc = analyze_event(
-                evt
-            )
+            (
+                x0_val,
+                y0_val,
+                theta_val,
+                phi_val,
+                cls_structs,
+                n_cls,
+                issues,
+                hit_tr,
+                in_acc,
+            ) = analyze_event(evt)
 
             # --- Fill histograms ---
             h_ncls.Fill(n_cls)
@@ -314,13 +359,6 @@ def write_txt_dump(
             h_dsum_vs_ncls.Fill(Dsum, n_cls)
 
             # --- Update counters ---
-            # Example placeholders
-            issues = {
-                "mean_x": False,
-                "theta": False,
-                "n_cls": False,
-                "same_z_count": 0,
-            }
             if issues["mean_x"]:
                 counters["bad_meanx"] += 1
             if issues["theta"]:
@@ -390,7 +428,9 @@ def create_ttree(root_file, arrays):
             y0_val[0],
             theta_val[0],
             phi_val[0],
+            _,
             n_cls[0],
+            _,
             hit_tr[0],
             in_acc[0],
         ) = analyze_event(evt)
@@ -465,11 +505,12 @@ def extract_selected_info(input_file, output_dir, save_tree=False):
     print(f"  Tracks with mean_x = -999: {counters['bad_meanx']}")
     print(f"  Tracks with theta > 72°: {counters['high_theta']}")
     print(f"  Tracks with ≥2 clusters sharing the same z: {counters['same_z_tracks']}")
-    # print number of n_cls=2 not in acceptance
     ncls2_not_in_acc = sum(
-        1 for evt in arrays if analyze_event(evt)[4] == 2 and not analyze_event(evt)[6]
+        1 for evt in arrays if analyze_event(evt)[5] == 2 and not analyze_event(evt)[8]
     )
     print(f"  n_cls=2 tracks not in acceptance: {ncls2_not_in_acc}")
+    ncls_gt3 = sum(1 for evt in arrays if analyze_event(evt)[5] > 3)
+    print(f"  Tracks with n_cls > 3: {ncls_gt3}")
     print("✅ Done.\n")
 
 
