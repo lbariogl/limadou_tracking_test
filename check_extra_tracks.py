@@ -96,7 +96,7 @@ def analyze_event(evt):
     same_z_count = len(z_values) - len(set(z_values))
 
     has_bad_meanx = any(c["mean_x"] == -999 for c in cls_structs)
-    bad_ncls = n_cls != 2
+    bad_ncls = n_cls > 3
     bad_theta = theta_val > 72
 
     issues = {
@@ -221,7 +221,7 @@ def write_txt_dump(
                 if issues["mean_x"]:
                     f.write("    - mean_x = -999\n")
                 if issues["n_cls"]:
-                    f.write("    - n_cls != 2 and n_cls != 3\n")
+                    f.write("    - n_cls > 3\n")
                 if issues["theta"]:
                     f.write("    - theta > 72°\n")
 
