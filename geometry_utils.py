@@ -157,4 +157,8 @@ def handle_two_cluster_track(cls_structs, theta, phi, dist_z):
     in_acc = is_in_acceptance(x_miss, y_miss)
     hit_tr = track_hit_TR(x_miss, y_miss, theta, phi)
 
-    return {"missing_layer": missing_layer, "in_acceptance": in_acc, "hit_TR": hit_tr}
+    return {
+        "missing_layer": missing_layer,
+        "missing_in_acceptance": in_acc,
+        "hit_TR": hit_tr,
+    }

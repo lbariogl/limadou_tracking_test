@@ -78,6 +78,7 @@ def load_and_select_events(input_file):
             "L2Event/cls_size",
             "L2Event/cls_res_x",
             "L2Event/cls_res_y",
+            "L2Event/cls_track_idx",
         ]
         arrays = tree.arrays(branches, library="ak")[mask]
 
@@ -110,16 +111,22 @@ def analyze_event(evt):
             "size": int(sz),
             "res_x": float(rx),
             "res_y": float(ry),
+            "track_idx": int(ti),
         }
-        for mx, my, mz, sz, rx, ry in zip(
+        for mx, my, mz, sz, rx, ry, ti in zip(
             evt["L2Event/cls_mean_x"],
             evt["L2Event/cls_mean_y"],
             evt["L2Event/cls_mean_z"],
             evt["L2Event/cls_size"],
             evt["L2Event/cls_res_x"],
             evt["L2Event/cls_res_y"],
+            evt["L2Event/cls_track_idx"],
         )
+        if ti not in (-1, -999)  # Filter: exclude clusters without valid track-idx
     ]
+
+    if len(cls_structs) == 0:
+        print("⚠️ Warning: event with all clusters invalid (track_idx = -1 or -999)")
 
     n_cls = len(cls_structs)
     z_values = [c["mean_z"] for c in cls_structs]
@@ -129,7 +136,7 @@ def analyze_event(evt):
     bad_ncls = n_cls > 3
 
     hit_tr = False
-    in_acc = False
+    missing_in_acc = False
 
     if n_cls == 2:
         # Compute acceptance and TR hit for 2-cluster tracks
@@ -137,7 +144,7 @@ def analyze_event(evt):
             cls_structs, math.radians(theta_val), math.radians(phi_val), dist_z=3.5
         )
         if result:
-            in_acc = result["in_acceptance"]
+            missing_in_acc = result["missing_in_acceptance"]
             hit_tr = result["hit_TR"]
     else:
         # For other tracks, only check TR hit
@@ -164,7 +171,7 @@ def analyze_event(evt):
         n_cls,
         issues,
         hit_tr,
-        in_acc,
+        missing_in_acc,
     )
 
 
@@ -194,41 +201,19 @@ def write_txt_dump(
                 n_cls,
                 issues,
                 hit_tr,
-                in_acc,
+                missing_in_acc,
             ) = analyze_event(evt)
 
             # --- Fill histograms ---
             h_ncls.Fill(n_cls)
-            # For demonstration, we fill h_samez with 0 as placeholder
-            h_samez.Fill(0)
 
             # Compute Dsum for residuals if available
-            Dsum = 0.0
-            cls_structs = [
-                {
-                    "mean_x": float(mx),
-                    "mean_y": float(my),
-                    "mean_z": float(mz),
-                    "res_x": float(rx),
-                    "res_y": float(ry),
-                    "size": int(sz),
-                }
-                for mx, my, mz, rx, ry, sz in zip(
-                    evt["L2Event/cls_mean_x"],
-                    evt["L2Event/cls_mean_y"],
-                    evt["L2Event/cls_mean_z"],
-                    evt["L2Event/cls_res_x"],
-                    evt["L2Event/cls_res_y"],
-                    evt["L2Event/cls_size"],
-                )
-            ]
+            Dsum = sum(c["res_x"] ** 2 + c["res_y"] ** 2 for c in cls_structs)
+            h_dsum_vs_ncls.Fill(Dsum, n_cls)
 
             for c in cls_structs:
                 h_resx.Fill(c["res_x"])
                 h_resy.Fill(c["res_y"])
-                Dsum += c["res_x"] ** 2 + c["res_y"] ** 2
-
-            h_dsum_vs_ncls.Fill(Dsum, n_cls)
 
             # --- Update counters ---
             if issues["mean_x"]:
@@ -245,7 +230,7 @@ def write_txt_dump(
                 f"theta={theta_val:.5f}, phi={phi_val:.5f}\n"
             )
             f.write(
-                f"  n_cls={n_cls}, Dsum={Dsum:.5f}, track_hit_TR={int(hit_tr)}, in_acceptance={int(in_acc)}\n"
+                f"  n_cls={n_cls}, Dsum={Dsum:.5f}, track_hit_TR={int(hit_tr)}, missing_in_acceptance={int(missing_in_acc)}\n"
             )
 
             if any([issues["mean_x"], issues["n_cls"], issues["no_TR_hit"]]):
@@ -259,12 +244,10 @@ def write_txt_dump(
 
             for j, c in enumerate(cls_structs):
                 f.write(
-                    f"    cls[{j}] -> mean_x={c['mean_x']:.5f}, "
-                    f"mean_y={c['mean_y']:.5f}, "
-                    f"mean_z={c['mean_z']:.5f}, "
-                    f"size={c['size']}, "
-                    f"res_x={c['res_x']:.5f}, "
-                    f"res_y={c['res_y']:.5f}\n"
+                    f"  Cluster {j}: "
+                    f"mean_x={c['mean_x']:.3f}, mean_y={c['mean_y']:.3f}, mean_z={c['mean_z']:.3f}, "
+                    f"size={c['size']}, res_x={c['res_x']:.3f}, res_y={c['res_y']:.3f}, "
+                    f"track_idx={c['track_idx']}\n"
                 )
 
             f.write("\n")
@@ -292,7 +275,7 @@ def create_ttree(root_file, arrays):
     tree_out.Branch("phi", phi_val, "phi/F")
     tree_out.Branch("n_cls", n_cls, "n_cls/I")
     tree_out.Branch("track_hit_TR", hit_tr, "track_hit_TR/I")
-    tree_out.Branch("in_acceptance", in_acc, "in_acceptance/I")
+    tree_out.Branch("missing_in_acceptance", in_acc, "missing_in_acceptance/I")
 
     for evt in arrays:
         (
@@ -310,7 +293,7 @@ def create_ttree(root_file, arrays):
 
     tree_out.Write()
     print(
-        "✅ TTree 'SelectedEvents' written successfully with track_hit_TR and in_acceptance."
+        "✅ TTree 'SelectedEvents' written successfully with track_hit_TR and missing_in_acceptance."
     )
 
 
@@ -326,7 +309,7 @@ def make_summary_hist(arrays, output_file, output_dir):
       2. Tracks with n_cls = 2
       3. Tracks with n_cls > 3
       4. Tracks with track_hit_TR
-      5. Tracks with n_cls=2 & track_hit_TR & in_acc
+      5. Tracks with n_cls=2 & track_hit_TR & !missing_in_acc
       6. Tracks with mean_x = -999
       7. Tracks with Dsum > 10
       8. Tracks with ≥2 clusters having the same z
@@ -342,7 +325,7 @@ def make_summary_hist(arrays, output_file, output_dir):
         "n_cls = 2",
         "n_cls > 3",
         "track_hit_TR",
-        "n_cls=2 + TR + acc",
+        "n_cls = 2 + TR + out of acc",
         "mean_x = -999",
         "Dsum > 10",
         "clusters same z",
@@ -353,7 +336,7 @@ def make_summary_hist(arrays, output_file, output_dir):
 
     # --- Counters ---
     total_after_masks = len(arrays)
-    ncls_eq2 = ncls_gt3 = track_hit_tr_count = ncls2_tr_inacc = 0
+    ncls_eq2 = ncls_gt3 = track_hit_tr_count = ncls2_tr_missing_out_of_acc = 0
     bad_meanx = dsum_gt10 = samez_ge2 = good_tracks = 0
 
     for evt in arrays:
@@ -366,7 +349,7 @@ def make_summary_hist(arrays, output_file, output_dir):
             n_cls,
             issues,
             hit_tr,
-            in_acc,
+            missing_in_acc,
         ) = analyze_event(evt)
 
         # (1) n_cls categories
@@ -375,11 +358,11 @@ def make_summary_hist(arrays, output_file, output_dir):
         if n_cls > 3:
             ncls_gt3 += 1
 
-        # (2) TR hit and acceptance
+        # (2) TR hit and missing out of acceptance
         if hit_tr:
             track_hit_tr_count += 1
-        if n_cls == 2 and hit_tr and in_acc:
-            ncls2_tr_inacc += 1
+        if n_cls == 2 and hit_tr and not missing_in_acc:
+            ncls2_tr_missing_out_of_acc += 1
 
         # (3) mean_x = -999 (taken directly from issues)
         if issues["mean_x"]:
@@ -406,7 +389,7 @@ def make_summary_hist(arrays, output_file, output_dir):
             n_cls < 4
             and not issues["mean_x"]
             and hit_tr
-            and (n_cls != 2 or not in_acc)
+            and (n_cls != 2 or not missing_in_acc)
             and Dsum < 10
             and issues["same_z_count"] == 0
         ):
@@ -418,7 +401,7 @@ def make_summary_hist(arrays, output_file, output_dir):
         ncls_eq2,
         ncls_gt3,
         track_hit_tr_count,
-        ncls2_tr_inacc,
+        ncls2_tr_missing_out_of_acc,
         bad_meanx,
         dsum_gt10,
         samez_ge2,
