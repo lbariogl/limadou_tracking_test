@@ -27,7 +27,7 @@ def safe_first(arr):
 # Data loading
 # ============================================================
 def load_and_select_events(input_file):
-    """Open ROOT file, apply trigger and base mask, and return selected arrays."""
+    """Open ROOT file, apply trigger, cluster, and base masks, and return selected arrays."""
     print(f"🔍 Opening ROOT file: {input_file}")
     with uproot.open(input_file) as f:
         tree = f["L2"]
@@ -47,7 +47,17 @@ def load_and_select_events(input_file):
 
         n_after_trig = np.count_nonzero(trig_mask)
         print(
-            f"Events after trig_mask: {n_after_trig} ({n_after_trig / total_events * 100:.2f}%)"
+            f"Events after trig_mask: {n_after_trig} "
+            f"({n_after_trig / total_events * 100:.2f}%)"
+        )
+
+        # --- Cluster mask: at least one cluster (non-empty cls_mean_x) ---
+        cls_mean_x = tree["L2Event/cls_mean_x"].array(library="ak")
+        cls_mask = ak.num(cls_mean_x) > 0
+        n_after_cls = np.count_nonzero(cls_mask & trig_mask)
+        print(
+            f"Events after cls_mask (non-empty cls_mean_x): {n_after_cls} "
+            f"({n_after_cls / total_events * 100:.2f}%)"
         )
 
         # --- Base mask ---
@@ -56,14 +66,16 @@ def load_and_select_events(input_file):
         base_mask = (ak.num(x0) == 1) & (ak.num(x0_m2) == 0)
         n_after_base = np.count_nonzero(base_mask)
         print(
-            f"Events after base_mask: {n_after_base} ({n_after_base / total_events * 100:.2f}%)"
+            f"Events after base_mask: {n_after_base} "
+            f"({n_after_base / total_events * 100:.2f}%)"
         )
 
         # --- Combined mask ---
-        mask = base_mask & trig_mask
+        mask = base_mask & trig_mask & cls_mask
         n_after_combined = np.count_nonzero(mask)
         print(
-            f"Events after both masks: {n_after_combined} ({n_after_combined / total_events * 100:.2f}%)"
+            f"Events after all masks (trig + cls + base): {n_after_combined} "
+            f"({n_after_combined / total_events * 100:.2f}%)"
         )
 
         # --- Branch loading ---
@@ -82,14 +94,16 @@ def load_and_select_events(input_file):
         ]
         arrays = tree.arrays(branches, library="ak")[mask]
 
+    # --- Summary printout ---
     print("\n✅ Event selection summary:")
-    print(f"  Total events:           {total_events}")
-    print(f"  After trig_mask:        {n_after_trig}")
-    print(f"  After base_mask:        {n_after_base}")
-    print(f"  After both masks:       {len(arrays)}")
+    print(f"  Total events:               {total_events}")
+    print(f"  After trig_mask:            {n_after_trig}")
+    print(f"  After cls_mask:             {n_after_cls}")
+    print(f"  After base_mask:            {n_after_base}")
+    print(f"  After all masks combined:   {len(arrays)}")
     print("--------------------------------------------------")
 
-    return arrays, n_after_trig
+    return arrays, n_after_trig, n_after_cls, n_after_base
 
 
 # ============================================================
@@ -455,7 +469,7 @@ def make_summary_hist(arrays, output_file, output_dir):
 # ============================================================
 def extract_selected_info(input_file, output_dir, save_tree=False):
     load_geometry()
-    arrays, n_after_trig = load_and_select_events(input_file)
+    arrays, n_after_trig, n_after_cls, n_after_base = load_and_select_events(input_file)
 
     os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(input_file))[0]

@@ -5,6 +5,7 @@ import ROOT
 import glob
 import sys
 import argparse
+import awkward as ak
 
 # === CONFIGURAZIONE ===
 input_directory = "/home/lbariogl/limadou/test/data/"  # Directory containing ROOT files
@@ -57,28 +58,55 @@ def process_root_file(input_file_name):
 
     out_file = ROOT.TFile(output_file_name, "RECREATE")
 
-    # === LETTURA TREE JAGGED CON UPROOT ===
+    # === READ TREE ===
     input_file = uproot.open(input_file_name)
     if tree_name not in input_file:
         print(f"⚠️ TTree '{tree_name}' not found in {input_file_name}, skipping...")
         return
 
     tree = input_file[tree_name]
-    print(f"✅ Read TTree '{tree_name}' with {tree.num_entries} events.")
+    total_events = tree.num_entries
+    print(f"✅ Read TTree '{tree_name}' with {total_events} events.")
 
-    # Read trigger configuration flag and create mask
+    # === TRIGGER MASK ===
     trig_conf_flag = tree["L2Event/trig_conf_flag[6]"].array(library="np")
-    # trig_conf_flag può essere ndarray (n_events,6) oppure object-array (per-event sequences)
     if getattr(trig_conf_flag, "ndim", None) == 2:
-        mask = trig_conf_flag[:, 1] == 1
-        print("primo")
+        trig_mask = trig_conf_flag[:, 1] == 1
+        print("Using trigger mask (ndim=2)")
     else:
-        mask = np.array([evt[1] for evt in trig_conf_flag]) == 1
-        print("secondo")
+        trig_mask = np.array([evt[1] for evt in trig_conf_flag]) == 1
+        print("Using trigger mask (object-array)")
+
+    n_after_trig = int(np.sum(trig_mask))
+    print(
+        f"Events after trig_mask: {n_after_trig} ({n_after_trig / total_events * 100:.2f}%)"
+    )
+
+    if n_after_trig == 0:
+        print("❌ No events passed trigger mask — skipping file.")
+        return
+
+    # === CLUSTER MASK: events with at least one cluster (non-empty cls_mean_x) ===
+    cls_mean_x = tree["L2Event/cls_mean_x"].array(library="ak")
+    cls_mask = ak.num(cls_mean_x) > 0
+
+    n_after_cls = int(np.sum(cls_mask & trig_mask))
+    print(
+        f"Events after cls_mask (non-empty cls_mean_x): {n_after_cls} ({n_after_cls / total_events * 100:.2f}%)"
+    )
+
+    if n_after_cls == 0:
+        print("❌ No events have non-empty clusters — skipping file.")
+        return
+
+    # === FINAL MASK COMBINATION ===
+    mask = trig_mask & cls_mask
+
     nsel = int(np.sum(mask))
-    print(f"Selected {nsel} events with trig_conf_flag[1] == 1")
+    print(f"Selected {nsel} events (trigger + cluster mask)")
+
     if nsel == 0:
-        print("No events selected by trig_conf_flag[1] == 1 — skipping file.")
+        print("❌ No events after combined masks — skipping file.")
         return
 
     # === Distribuzione del numero di clusters per evento ===
