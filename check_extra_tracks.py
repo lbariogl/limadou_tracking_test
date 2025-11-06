@@ -12,6 +12,8 @@ from geometry_utils import (
     handle_two_cluster_track,
 )
 
+ROOT.gStyle.SetOptStat(0)
+
 
 # ============================================================
 # Utility functions
@@ -30,6 +32,11 @@ def load_and_select_events(input_file):
     with uproot.open(input_file) as f:
         tree = f["L2"]
 
+        # --- Total number of events ---
+        total_events = tree.num_entries
+        print(f"Total events in file: {total_events}")
+
+        # --- Trigger mask ---
         trig_conf_flag = tree["L2Event/trig_conf_flag[6]"].array(library="np")
         if getattr(trig_conf_flag, "ndim", None) == 2:
             trig_mask = trig_conf_flag[:, 1] == 1
@@ -38,11 +45,28 @@ def load_and_select_events(input_file):
             trig_mask = np.array([evt[1] for evt in trig_conf_flag]) == 1
             print("Using trigger mask (object-array)")
 
+        n_after_trig = np.count_nonzero(trig_mask)
+        print(
+            f"Events after trig_mask: {n_after_trig} ({n_after_trig / total_events * 100:.2f}%)"
+        )
+
+        # --- Base mask ---
         x0 = tree["L2Event/x0"].array(library="ak")
         x0_m2 = tree["L2Event/x0_m2"].array(library="ak")
         base_mask = (ak.num(x0) == 1) & (ak.num(x0_m2) == 0)
-        mask = base_mask & trig_mask
+        n_after_base = np.count_nonzero(base_mask)
+        print(
+            f"Events after base_mask: {n_after_base} ({n_after_base / total_events * 100:.2f}%)"
+        )
 
+        # --- Combined mask ---
+        mask = base_mask & trig_mask
+        n_after_combined = np.count_nonzero(mask)
+        print(
+            f"Events after both masks: {n_after_combined} ({n_after_combined / total_events * 100:.2f}%)"
+        )
+
+        # --- Branch loading ---
         branches = [
             "L2Event/x0",
             "L2Event/y0",
@@ -57,8 +81,14 @@ def load_and_select_events(input_file):
         ]
         arrays = tree.arrays(branches, library="ak")[mask]
 
-    print(f"✅ Selected {len(arrays)} events (mask + trigger).")
-    return arrays
+    print("\n✅ Event selection summary:")
+    print(f"  Total events:           {total_events}")
+    print(f"  After trig_mask:        {n_after_trig}")
+    print(f"  After base_mask:        {n_after_base}")
+    print(f"  After both masks:       {len(arrays)}")
+    print("--------------------------------------------------")
+
+    return arrays, n_after_trig
 
 
 # ============================================================
@@ -285,7 +315,7 @@ def create_ttree(root_file, arrays):
 
 
 # ============================================================
-# Summary histogram creation
+# Summary histogram creation (updated with "good tracks" count)
 # ============================================================
 def make_summary_hist(arrays, output_file, output_dir):
     """
@@ -300,23 +330,23 @@ def make_summary_hist(arrays, output_file, output_dir):
       6. Tracks with mean_x = -999
       7. Tracks with Dsum > 10
       8. Tracks with ≥2 clusters having the same z
+      9. "Good" tracks passing all quality conditions
     """
 
     print("\n📊 Building summary histogram...")
 
     # --- Define histogram ---
-    h_summary = ROOT.TH1F(
-        "h_summary", "Event summary counts;Category;Counts", 8, 0.5, 8.5
-    )
+    h_summary = ROOT.TH1F("h_summary", "Event summary counts;;Counts", 9, 0.5, 9.5)
     labels = [
         "Tracks after masks",
         "n_cls = 2",
         "n_cls > 3",
         "track_hit_TR",
-        "n_cls=2 & track_hit_TR & in_acc",
+        "n_cls=2 + TR + acc",
         "mean_x = -999",
         "Dsum > 10",
-        "≥2 clusters same z",
+        "clusters same z",
+        "Good tracks",
     ]
     for i, label in enumerate(labels, start=1):
         h_summary.GetXaxis().SetBinLabel(i, label)
@@ -324,7 +354,7 @@ def make_summary_hist(arrays, output_file, output_dir):
     # --- Counters ---
     total_after_masks = len(arrays)
     ncls_eq2 = ncls_gt3 = track_hit_tr_count = ncls2_tr_inacc = 0
-    bad_meanx = dsum_gt10 = samez_ge2 = 0
+    bad_meanx = dsum_gt10 = samez_ge2 = good_tracks = 0
 
     for evt in arrays:
         (
@@ -364,6 +394,24 @@ def make_summary_hist(arrays, output_file, output_dir):
         if issues["same_z_count"] >= 2:
             samez_ge2 += 1
 
+        # (6) "Good track" selection
+        # Conditions:
+        # - n_cls < 4
+        # - not bad_mean_x
+        # - hit_TR
+        # - if n_cls == 2: not in_acc ; if n_cls == 3: automatically ok
+        # - Dsum < 10
+        # - no same-z clusters
+        if (
+            n_cls < 4
+            and not issues["mean_x"]
+            and hit_tr
+            and (n_cls != 2 or not in_acc)
+            and Dsum < 10
+            and issues["same_z_count"] == 0
+        ):
+            good_tracks += 1
+
     # --- Fill histogram bins ---
     values = [
         total_after_masks,
@@ -374,6 +422,7 @@ def make_summary_hist(arrays, output_file, output_dir):
         bad_meanx,
         dsum_gt10,
         samez_ge2,
+        good_tracks,
     ]
     for i, v in enumerate(values, start=1):
         h_summary.SetBinContent(i, v)
@@ -382,18 +431,31 @@ def make_summary_hist(arrays, output_file, output_dir):
     print("\n===== Summary Counts =====")
     for label, value in zip(labels, values):
         perc = (value / total_after_masks * 100) if total_after_masks > 0 else 0
-        print(f"{label:<40}: {value:6d} ({perc:5.2f}%)")
+        print(f"{label:<45}: {value:6d} ({perc:5.2f}%)")
 
     # --- Save histogram ---
     output_file.cd()
     h_summary.Write()
 
     # --- Draw and save canvas ---
-    c_summary = ROOT.TCanvas("c_summary", "Summary", 900, 600)
+    # --- Draw and save canvas ---
+    c_summary = ROOT.TCanvas("c_summary", "Summary", 1000, 600)
+    c_summary.SetBottomMargin(0.28)
+
+    # Style
     h_summary.SetFillColor(ROOT.kAzure - 4)
-    h_summary.SetBarWidth(0.45)
-    h_summary.SetBarOffset(0.1)
-    h_summary.Draw("BAR2 TEXT0")
+    h_summary.SetLineColor(ROOT.kAzure - 4)
+    h_summary.SetStats(0)
+
+    # Force order + angled labels
+    h_summary.GetXaxis().SetRangeUser(0.5, 9.5)
+    h_summary.GetXaxis().SetCanExtend(False)
+    h_summary.GetXaxis().LabelsOption("v")  # or "a" for 45°
+    h_summary.GetXaxis().SetLabelSize(0.035)
+    h_summary.GetXaxis().SetTitle("")
+
+    # Draw as continuous histogram
+    h_summary.Draw("hist text0")
 
     # Save as PDF and also inside ROOT file
     pdf_path = os.path.join(output_dir, "summary_counts.pdf")
@@ -410,7 +472,7 @@ def make_summary_hist(arrays, output_file, output_dir):
 # ============================================================
 def extract_selected_info(input_file, output_dir, save_tree=False):
     load_geometry()
-    arrays = load_and_select_events(input_file)
+    arrays, n_after_trig = load_and_select_events(input_file)
 
     os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(input_file))[0]
