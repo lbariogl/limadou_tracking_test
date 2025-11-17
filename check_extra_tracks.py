@@ -27,7 +27,13 @@ def safe_first(arr):
 # Data loading
 # ============================================================
 def load_and_select_events(input_file):
-    """Open ROOT file, apply trigger, class, and base mask, and return selected arrays."""
+    """
+    Open ROOT file, apply:
+      - trigger mask (trig_conf_flag)
+      - trigger-count mask (scintillator sums TR1 & TR2)
+      - base_mask (x0/x0_m2 multiplicity)
+    and return selected arrays and counters.
+    """
     print(f"🔍 Opening ROOT file: {input_file}")
     with uproot.open(input_file) as f:
         tree = f["L2"]
@@ -46,37 +52,68 @@ def load_and_select_events(input_file):
             print("Using trigger mask (object-array)")
 
         n_after_trig = np.count_nonzero(trig_mask)
-        print(f"Events after trig_mask: {n_after_trig} ({n_after_trig / total_events * 100:.2f}%)")
+        print(
+            f"Events after trig_mask: {n_after_trig} ({n_after_trig / total_events * 100:.2f}%)"
+        )
 
-        # --- Class mask (non-empty cls_mean_x) ---
-        cls_mean_x = tree["L2Event/cls_mean_x"].array(library="ak")
-        cls_mask = ak.num(cls_mean_x) > 0
-        mask_trig_cls = trig_mask & cls_mask
-        n_after_cls = np.count_nonzero(mask_trig_cls)
-        print(f"Events with non-empty cls_mean_x (after trig): {n_after_cls} ({n_after_cls / total_events * 100:.2f}%)")
+        # --- Trigger-count mask based on scintillator sums (TR1 & TR2) ---
+        # Read arrays with awkward
+        # Keys assumed: "L2Event/scint_raw_counts.scint_raw_counts.TR1_HG" and TR2_HG
+        # Each event: TR1_HG -> (5,2), TR2_HG -> (4,2)
+        try:
+            tr1_hg = tree[
+                "L2Event/scint_raw_counts/scint_raw_counts.TR1_HG[5][2]"
+            ].array(library="ak")
+            tr2_hg = tree[
+                "L2Event/scint_raw_counts/scint_raw_counts.TR2_HG[4][2]"
+            ].array(library="ak")
+        except Exception as e:
+            # If keys differ, try alternative naming (compatibility)
+            tr1_key = "L2Event/scint_raw_counts/scint_raw_counts.TR1_HG[5][2]"
+            tr2_key = "L2Event/scint_raw_counts/scint_raw_counts.TR2_HG[4][2]"
+            if tr1_key in tree.keys() and tr2_key in tree.keys():
+                tr1_hg = tree[tr1_key].array(library="ak")
+                tr2_hg = tree[tr2_key].array(library="ak")
+            else:
+                raise RuntimeError(
+                    "Could not find TR1/TR2 scintillator branches in tree."
+                ) from e
 
-        # --- Evaluate x0, x0_m2 AFTER trig + cls mask ---
-        x0 = tree["L2Event/x0"].array(library="ak")[mask_trig_cls]
-        x0_m2 = tree["L2Event/x0_m2"].array(library="ak")[mask_trig_cls]
+        # Sum the pairs along last axis -> shape becomes (Nevents, 5) and (Nevents, 4)
+        # If arrays are not exactly shaped (e.g. missing), ak.sum still works elementwise.
+        tr1_sums = ak.sum(tr1_hg, axis=2)
+        tr2_sums = ak.sum(tr2_hg, axis=2)
 
-        n_x0_eq1 = np.count_nonzero(ak.num(x0) == 1)
-        n_x0m2_eq1 = np.count_nonzero(ak.num(x0_m2) == 1)
-        print(f"Events (after trig+cls) with exactly one x0: {n_x0_eq1} ({n_x0_eq1 / total_events * 100:.2f}%)")
-        print(f"Events (after trig+cls) with exactly one x0_m2: {n_x0m2_eq1} ({n_x0m2_eq1 / total_events * 100:.2f}%)")
+        # Condition: at least one pair sum > 50
+        tr1_counts_good = ak.any(tr1_sums > 50, axis=1)
+        tr2_counts_good = ak.any(tr2_sums > 50, axis=1)
 
-        # --- Base mask (full array, not filtered) ---
+        # Final trigger-count mask = AND (both TR1 and TR2 must have at least one pair > 50)
+        trig_count_mask = tr1_counts_good & tr2_counts_good
+
+        # Count events surviving trig + trig_count
+        n_after_trig_count = np.count_nonzero(trig_mask & trig_count_mask)
+        print(
+            f"Events after trig + scintillator-count mask: {n_after_trig_count} ({n_after_trig_count / total_events * 100:.2f}%)"
+        )
+
+        # --- Base mask (multiplicity condition on full arrays) ---
         x0_full = tree["L2Event/x0"].array(library="ak")
         x0_m2_full = tree["L2Event/x0_m2"].array(library="ak")
         base_mask = (ak.num(x0_full) == 1) & (ak.num(x0_m2_full) == 0)
         n_after_base = np.count_nonzero(base_mask)
-        print(f"Events after base_mask: {n_after_base} ({n_after_base / total_events * 100:.2f}%)")
+        print(
+            f"Events after base_mask (x0==1 & x0_m2==0): {n_after_base} ({n_after_base / total_events * 100:.2f}%)"
+        )
 
-        # --- Combined mask ---
-        mask = base_mask & trig_mask
+        # --- Combined mask (final selection) ---
+        mask = trig_mask & trig_count_mask & base_mask
         n_after_combined = np.count_nonzero(mask)
-        print(f"Events after both masks: {n_after_combined} ({n_after_combined / total_events * 100:.2f}%)")
+        print(
+            f"Events after all masks (trig & scint counts & base): {n_after_combined} ({n_after_combined / total_events * 100:.2f}%)"
+        )
 
-        # --- Branch loading ---
+        # --- Branch loading (only for selected events) ---
         branches = [
             "L2Event/x0",
             "L2Event/y0",
@@ -92,17 +129,17 @@ def load_and_select_events(input_file):
         ]
         arrays = tree.arrays(branches, library="ak")[mask]
 
+    # --- Summary printout ---
     print("\n✅ Event selection summary:")
-    print(f"  Total events:                        {total_events}")
-    print(f"  After trig_mask:                     {n_after_trig}")
-    print(f"  With non-empty cls_mean_x:           {n_after_cls}")
-    print(f"  x0 == 1 (after trig+cls):            {n_x0_eq1}")
-    print(f"  x0_m2 == 1 (after trig+cls):         {n_x0m2_eq1}")
-    print(f"  After base_mask:                     {n_after_base}")
-    print(f"  After both masks:                    {len(arrays)}")
+    print(f"  Total events:                               {total_events}")
+    print(f"  After trig_mask:                            {n_after_trig}")
+    print(f"  After trig+scintillator-count mask:         {n_after_trig_count}")
+    print(f"  After base_mask (x0==1 & x0_m2==0):         {n_after_base}")
+    print(f"  After all masks combined:                    {len(arrays)}")
     print("--------------------------------------------------")
 
-    return arrays, n_after_trig, n_after_cls, n_after_base
+    # Return arrays and counters (in the order used downstream)
+    return arrays, n_after_trig, n_after_trig_count, n_after_base
 
 
 # ============================================================
