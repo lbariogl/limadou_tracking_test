@@ -27,7 +27,7 @@ def safe_first(arr):
 # Data loading
 # ============================================================
 def load_and_select_events(input_file):
-    """Open ROOT file, apply trigger, cluster, and base masks, and return selected arrays."""
+    """Open ROOT file, apply trigger, class, and base mask, and return selected arrays."""
     print(f"🔍 Opening ROOT file: {input_file}")
     with uproot.open(input_file) as f:
         tree = f["L2"]
@@ -46,37 +46,35 @@ def load_and_select_events(input_file):
             print("Using trigger mask (object-array)")
 
         n_after_trig = np.count_nonzero(trig_mask)
-        print(
-            f"Events after trig_mask: {n_after_trig} "
-            f"({n_after_trig / total_events * 100:.2f}%)"
-        )
+        print(f"Events after trig_mask: {n_after_trig} ({n_after_trig / total_events * 100:.2f}%)")
 
-        # --- Cluster mask: at least one cluster (non-empty cls_mean_x) ---
+        # --- Class mask (non-empty cls_mean_x) ---
         cls_mean_x = tree["L2Event/cls_mean_x"].array(library="ak")
         cls_mask = ak.num(cls_mean_x) > 0
-        n_after_cls = np.count_nonzero(cls_mask & trig_mask)
-        print(
-            f"Events after cls_mask (non-empty cls_mean_x): {n_after_cls} "
-            f"({n_after_cls / total_events * 100:.2f}%)"
-        )
+        mask_trig_cls = trig_mask & cls_mask
+        n_after_cls = np.count_nonzero(mask_trig_cls)
+        print(f"Events with non-empty cls_mean_x (after trig): {n_after_cls} ({n_after_cls / total_events * 100:.2f}%)")
 
-        # --- Base mask ---
-        x0 = tree["L2Event/x0"].array(library="ak")
-        x0_m2 = tree["L2Event/x0_m2"].array(library="ak")
-        base_mask = (ak.num(x0) == 1) & (ak.num(x0_m2) == 0)
+        # --- Evaluate x0, x0_m2 AFTER trig + cls mask ---
+        x0 = tree["L2Event/x0"].array(library="ak")[mask_trig_cls]
+        x0_m2 = tree["L2Event/x0_m2"].array(library="ak")[mask_trig_cls]
+
+        n_x0_eq1 = np.count_nonzero(ak.num(x0) == 1)
+        n_x0m2_eq1 = np.count_nonzero(ak.num(x0_m2) == 1)
+        print(f"Events (after trig+cls) with exactly one x0: {n_x0_eq1} ({n_x0_eq1 / total_events * 100:.2f}%)")
+        print(f"Events (after trig+cls) with exactly one x0_m2: {n_x0m2_eq1} ({n_x0m2_eq1 / total_events * 100:.2f}%)")
+
+        # --- Base mask (full array, not filtered) ---
+        x0_full = tree["L2Event/x0"].array(library="ak")
+        x0_m2_full = tree["L2Event/x0_m2"].array(library="ak")
+        base_mask = (ak.num(x0_full) == 1) & (ak.num(x0_m2_full) == 0)
         n_after_base = np.count_nonzero(base_mask)
-        print(
-            f"Events after base_mask: {n_after_base} "
-            f"({n_after_base / total_events * 100:.2f}%)"
-        )
+        print(f"Events after base_mask: {n_after_base} ({n_after_base / total_events * 100:.2f}%)")
 
         # --- Combined mask ---
-        mask = base_mask & trig_mask & cls_mask
+        mask = base_mask & trig_mask
         n_after_combined = np.count_nonzero(mask)
-        print(
-            f"Events after all masks (trig + cls + base): {n_after_combined} "
-            f"({n_after_combined / total_events * 100:.2f}%)"
-        )
+        print(f"Events after both masks: {n_after_combined} ({n_after_combined / total_events * 100:.2f}%)")
 
         # --- Branch loading ---
         branches = [
@@ -94,13 +92,14 @@ def load_and_select_events(input_file):
         ]
         arrays = tree.arrays(branches, library="ak")[mask]
 
-    # --- Summary printout ---
     print("\n✅ Event selection summary:")
-    print(f"  Total events:               {total_events}")
-    print(f"  After trig_mask:            {n_after_trig}")
-    print(f"  After cls_mask:             {n_after_cls}")
-    print(f"  After base_mask:            {n_after_base}")
-    print(f"  After all masks combined:   {len(arrays)}")
+    print(f"  Total events:                        {total_events}")
+    print(f"  After trig_mask:                     {n_after_trig}")
+    print(f"  With non-empty cls_mean_x:           {n_after_cls}")
+    print(f"  x0 == 1 (after trig+cls):            {n_x0_eq1}")
+    print(f"  x0_m2 == 1 (after trig+cls):         {n_x0m2_eq1}")
+    print(f"  After base_mask:                     {n_after_base}")
+    print(f"  After both masks:                    {len(arrays)}")
     print("--------------------------------------------------")
 
     return arrays, n_after_trig, n_after_cls, n_after_base
