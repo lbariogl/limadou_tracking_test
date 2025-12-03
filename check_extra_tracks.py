@@ -15,214 +15,7 @@ from geometry_utils import (
 ROOT.gStyle.SetOptStat(0)
 
 
-# ============================================================
-# Utility functions
-# ============================================================
-def safe_first(arr):
-    """Safely return the first element of an array, or NaN if empty."""
-    return float(arr[0]) if len(arr) > 0 else float("nan")
-
-
-# ============================================================
-# Data loading
-# ============================================================
-def load_and_select_events(input_file):
-    """
-    Open ROOT file, apply:
-      - trigger mask (trig_conf_flag)
-      - trigger-count mask (scintillator sums TR1 & TR2)
-      - base_mask (x0/x0_m2 multiplicity)
-    and return selected arrays and counters.
-    """
-    print(f"🔍 Opening ROOT file: {input_file}")
-    with uproot.open(input_file) as f:
-        tree = f["L2"]
-
-        # --- Total number of events ---
-        total_events = tree.num_entries
-        print(f"Total events in file: {total_events}")
-
-        # --- Trigger mask ---
-        trig_conf_flag = tree["L2Event/trig_conf_flag[6]"].array(library="np")
-        if getattr(trig_conf_flag, "ndim", None) == 2:
-            trig_mask = trig_conf_flag[:, 1] == 1
-            print("Using trigger mask (ndim=2)")
-        else:
-            trig_mask = np.array([evt[1] for evt in trig_conf_flag]) == 1
-            print("Using trigger mask (object-array)")
-
-        n_after_trig = np.count_nonzero(trig_mask)
-        print(
-            f"Events after trig_mask: {n_after_trig} ({n_after_trig / total_events * 100:.2f}%)"
-        )
-
-        # --- Trigger-count mask based on scintillator sums (TR1 & TR2) ---
-        # Read arrays with awkward
-        # Keys assumed: "L2Event/scint_raw_counts.scint_raw_counts.TR1_HG" and TR2_HG
-        # Each event: TR1_HG -> (5,2), TR2_HG -> (4,2)
-        try:
-            tr1_hg = tree[
-                "L2Event/scint_raw_counts/scint_raw_counts.TR1_HG[5][2]"
-            ].array(library="ak")
-            tr2_hg = tree[
-                "L2Event/scint_raw_counts/scint_raw_counts.TR2_HG[4][2]"
-            ].array(library="ak")
-        except Exception as e:
-            # If keys differ, try alternative naming (compatibility)
-            tr1_key = "L2Event/scint_raw_counts/scint_raw_counts.TR1_HG[5][2]"
-            tr2_key = "L2Event/scint_raw_counts/scint_raw_counts.TR2_HG[4][2]"
-            if tr1_key in tree.keys() and tr2_key in tree.keys():
-                tr1_hg = tree[tr1_key].array(library="ak")
-                tr2_hg = tree[tr2_key].array(library="ak")
-            else:
-                raise RuntimeError(
-                    "Could not find TR1/TR2 scintillator branches in tree."
-                ) from e
-
-        # Sum the pairs along last axis -> shape becomes (Nevents, 5) and (Nevents, 4)
-        # If arrays are not exactly shaped (e.g. missing), ak.sum still works elementwise.
-        tr1_sums = ak.sum(tr1_hg, axis=2)
-        tr2_sums = ak.sum(tr2_hg, axis=2)
-
-        # Condition: at least one pair sum > 50
-        tr1_counts_good = ak.any(tr1_sums > 50, axis=1)
-        tr2_counts_good = ak.any(tr2_sums > 50, axis=1)
-
-        # Final trigger-count mask = AND (both TR1 and TR2 must have at least one pair > 50)
-        trig_count_mask = tr1_counts_good & tr2_counts_good
-
-        # Count events surviving trig + trig_count
-        n_after_trig_count = np.count_nonzero(trig_mask & trig_count_mask)
-        print(
-            f"Events after trig + scintillator-count mask: {n_after_trig_count} ({n_after_trig_count / total_events * 100:.2f}%)"
-        )
-
-        # --- Base mask (multiplicity condition on full arrays) ---
-        x0_full = tree["L2Event/x0"].array(library="ak")
-        x0_m2_full = tree["L2Event/x0_m2"].array(library="ak")
-        base_mask = (ak.num(x0_full) == 1) & (ak.num(x0_m2_full) == 0)
-        n_after_base = np.count_nonzero(base_mask)
-        print(
-            f"Events after base_mask (x0==1 & x0_m2==0): {n_after_base} ({n_after_base / total_events * 100:.2f}%)"
-        )
-
-        # --- Combined mask (final selection) ---
-        mask = trig_mask & trig_count_mask & base_mask
-        n_after_combined = np.count_nonzero(mask)
-        print(
-            f"Events after all masks (trig & scint counts & base): {n_after_combined} ({n_after_combined / total_events * 100:.2f}%)"
-        )
-
-        # --- Branch loading (only for selected events) ---
-        branches = [
-            "L2Event/x0",
-            "L2Event/y0",
-            "L2Event/theta",
-            "L2Event/phi",
-            "L2Event/cls_mean_x",
-            "L2Event/cls_mean_y",
-            "L2Event/cls_mean_z",
-            "L2Event/cls_size",
-            "L2Event/cls_res_x",
-            "L2Event/cls_res_y",
-            "L2Event/cls_track_idx",
-        ]
-        arrays = tree.arrays(branches, library="ak")[mask]
-
-    # --- Summary printout ---
-    print("\n✅ Event selection summary:")
-    print(f"  Total events:                               {total_events}")
-    print(f"  After trig_mask:                            {n_after_trig}")
-    print(f"  After trig+scintillator-count mask:         {n_after_trig_count}")
-    print(f"  After base_mask (x0==1 & x0_m2==0):         {n_after_base}")
-    print(f"  After all masks combined:                    {len(arrays)}")
-    print("--------------------------------------------------")
-
-    # Return arrays and counters (in the order used downstream)
-    return arrays, n_after_trig, n_after_trig_count, n_after_base
-
-
-# ============================================================
-# Event-level analysis
-# ============================================================
-def analyze_event(evt):
-    """Compute key metrics, flags, and acceptance for one event."""
-    x0_val = safe_first(evt["L2Event/x0"])
-    y0_val = safe_first(evt["L2Event/y0"])
-    theta_val = safe_first(evt["L2Event/theta"])
-    phi_val = safe_first(evt["L2Event/phi"])
-
-    # Build cluster structures including residuals and size
-    cls_structs = [
-        {
-            "mean_x": float(mx),
-            "mean_y": float(my),
-            "mean_z": float(mz),
-            "size": int(sz),
-            "res_x": float(rx),
-            "res_y": float(ry),
-            "track_idx": int(ti),
-        }
-        for mx, my, mz, sz, rx, ry, ti in zip(
-            evt["L2Event/cls_mean_x"],
-            evt["L2Event/cls_mean_y"],
-            evt["L2Event/cls_mean_z"],
-            evt["L2Event/cls_size"],
-            evt["L2Event/cls_res_x"],
-            evt["L2Event/cls_res_y"],
-            evt["L2Event/cls_track_idx"],
-        )
-        if ti not in (-1, -999)  # Filter: exclude clusters without valid track-idx
-    ]
-
-    if len(cls_structs) == 0:
-        print("⚠️ Warning: event with all clusters invalid (track_idx = -1 or -999)")
-
-    n_cls = len(cls_structs)
-    z_values = [c["mean_z"] for c in cls_structs]
-    same_z_count = len(z_values) - len(set(z_values))
-
-    has_bad_meanx = any(c["mean_x"] == -999 for c in cls_structs)
-    bad_ncls = n_cls > 3
-
-    hit_tr = False
-    missing_in_acc = False
-
-    if n_cls == 2:
-        # Compute acceptance and TR hit for 2-cluster tracks
-        result = handle_two_cluster_track(
-            cls_structs, math.radians(theta_val), math.radians(phi_val), dist_z=3.5
-        )
-        if result:
-            missing_in_acc = result["missing_in_acceptance"]
-            hit_tr = result["hit_TR"]
-    else:
-        # For other tracks, only check TR hit
-        hit_tr = track_hit_TR(
-            x0_val, y0_val, math.radians(theta_val), math.radians(phi_val)
-        )
-
-    # Replace "theta > 72" issue with "not track_hit_TR"
-    bad_trhit = not hit_tr
-
-    issues = {
-        "mean_x": has_bad_meanx,
-        "n_cls": bad_ncls,
-        "no_TR_hit": bad_trhit,
-        "same_z_count": same_z_count,
-    }
-
-    return (
-        x0_val,
-        y0_val,
-        theta_val,
-        phi_val,
-        cls_structs,
-        n_cls,
-        issues,
-        hit_tr,
-        missing_in_acc,
-    )
+from utils import safe_first, load_and_select_events, analyze_event
 
 
 # ============================================================
@@ -505,7 +298,15 @@ def make_summary_hist(arrays, output_file, output_dir):
 # ============================================================
 def extract_selected_info(input_file, output_dir, save_tree=False):
     load_geometry()
-    arrays, n_after_trig, n_after_cls, n_after_base = load_and_select_events(input_file)
+
+    # --- Define which masks to apply ---
+    masks_to_apply = {
+        'trig': False,
+        'trig_count': True,
+        'one_hough_zero_comb': True,
+    }
+
+    arrays, counters = load_and_select_events(input_file, masks_to_apply=masks_to_apply)
 
     os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(input_file))[0]
