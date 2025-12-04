@@ -133,7 +133,7 @@ def load_and_select_events(input_file, masks_to_apply=None, multiplicity_config=
 
     Returns:
       (arrays, counters_dict)
-      where counters_dict = {'total': N, 'trig': n_trig or None, 'trig_count': n_tc or None, 'x0_multiplicity': n_x0 or None, 'x0_m2_multiplicity': n_x0m2 or None, 'final': n_final}
+      where counters_dict = {'total': N, 'trig': n_trig or None, 'trig_count': n_tc or None, 'x0_multiplicity': n_x0 or None, 'x0_m2_multiplicity': n_x0m2 or None, 'x0_and_x0_m2_multiplicity': n_and or None, 'final': n_final}
     """
     if masks_to_apply is None:
         masks_to_apply = {'trig': True, 'trig_count': True, 'x0_multiplicity': False, 'x0_m2_multiplicity': False}
@@ -148,7 +148,7 @@ def load_and_select_events(input_file, masks_to_apply=None, multiplicity_config=
         print(f"Total events in file: {total_events}")
 
         mask = np.ones(total_events, dtype=bool)
-        counters = {'total': total_events, 'trig': None, 'trig_count': None, 'x0_multiplicity': None, 'x0_m2_multiplicity': None}
+        counters = {'total': total_events, 'trig': None, 'trig_count': None, 'x0_multiplicity': None, 'x0_m2_multiplicity': None, 'x0_and_x0_m2_multiplicity': None}
 
         # --- Trigger mask ---
         if masks_to_apply.get('trig', True):
@@ -168,25 +168,37 @@ def load_and_select_events(input_file, masks_to_apply=None, multiplicity_config=
             )
             mask = mask & trig_count_mask
 
-        # --- x0 multiplicity mask ---
+        # --- x0 and x0_m2 multiplicity masks ---
+        x0_multiplicity_mask = None
+        x0_m2_multiplicity_mask = None
+
         if masks_to_apply.get('x0_multiplicity', False):
             x0_count = multiplicity_config.get('x0_count', 1)
             x0_multiplicity_mask, n_x0 = compute_x0_multiplicity_mask(tree, x0_count)
             counters['x0_multiplicity'] = n_x0
             print(
-                f"Events after x0_multiplicity_mask (x0=={x0_count}): {n_x0} ({n_x0 / total_events * 100:.2f}%)"
+                f"Events after x0_multiplicity_mask (x0 == {x0_count}): {n_x0} ({n_x0 / total_events * 100:.2f}%)"
             )
             mask = mask & x0_multiplicity_mask
 
-        # --- x0_m2 multiplicity mask ---
         if masks_to_apply.get('x0_m2_multiplicity', False):
             x0_m2_count = multiplicity_config.get('x0_m2_count', 0)
             x0_m2_multiplicity_mask, n_x0_m2 = compute_x0_m2_multiplicity_mask(tree, x0_m2_count)
             counters['x0_m2_multiplicity'] = n_x0_m2
             print(
-                f"Events after x0_m2_multiplicity_mask (x0_m2=={x0_m2_count}): {n_x0_m2} ({n_x0_m2 / total_events * 100:.2f}%)"
+                f"Events after x0_m2_multiplicity_mask (x0_m2 == {x0_m2_count}): {n_x0_m2} ({n_x0_m2 / total_events * 100:.2f}%)"
             )
             mask = mask & x0_m2_multiplicity_mask
+
+        # --- AND count if both multiplicities are enabled ---
+        if masks_to_apply.get('x0_multiplicity', False) and masks_to_apply.get('x0_m2_multiplicity', False):
+            x0_count = multiplicity_config.get('x0_count', 1)
+            x0_m2_count = multiplicity_config.get('x0_m2_count', 0)
+            n_and = np.count_nonzero(x0_multiplicity_mask & x0_m2_multiplicity_mask)
+            counters['x0_and_x0_m2_multiplicity'] = n_and
+            print(
+                f"Events after AND of both multiplicities (x0 == {x0_count} AND x0_m2 == {x0_m2_count}): {n_and} ({n_and / total_events * 100:.2f}%)"
+            )
 
         # --- Branch loading (only for selected events) ---
         branches = [
@@ -208,17 +220,33 @@ def load_and_select_events(input_file, masks_to_apply=None, multiplicity_config=
 
     # --- Summary printout ---
     print("\n✅ Event selection summary:")
-    print(f"  Total events:                               {total_events}")
+    print("=" * 60)
+
+    summary_items = []
+    summary_items.append(("Total events", total_events))
+
     if counters['trig'] is not None:
-        print(f"  After trig_mask:                            {counters['trig']}")
+        summary_items.append(("After trig_mask", counters['trig']))
     if counters['trig_count'] is not None:
-        print(f"  After trig_count_mask:                      {counters['trig_count']}")
+        summary_items.append(("After trig_count_mask", counters['trig_count']))
     if counters['x0_multiplicity'] is not None:
-        print(f"  After x0_multiplicity_mask:                 {counters['x0_multiplicity']}")
+        x0_count = multiplicity_config.get('x0_count', 1)
+        summary_items.append((f"After x0_multiplicity_mask (x0 == {x0_count})", counters['x0_multiplicity']))
     if counters['x0_m2_multiplicity'] is not None:
-        print(f"  After x0_m2_multiplicity_mask:              {counters['x0_m2_multiplicity']}")
-    print(f"  After all masks combined:                    {n_final}")
-    print("--------------------------------------------------")
+        x0_m2_count = multiplicity_config.get('x0_m2_count', 0)
+        summary_items.append((f"After x0_m2_multiplicity_mask (x0_m2 == {x0_m2_count})", counters['x0_m2_multiplicity']))
+    if counters['x0_and_x0_m2_multiplicity'] is not None:
+        x0_count = multiplicity_config.get('x0_count', 1)
+        x0_m2_count = multiplicity_config.get('x0_m2_count', 0)
+        summary_items.append((f"AND of both (x0 == {x0_count} AND x0_m2 == {x0_m2_count})", counters['x0_and_x0_m2_multiplicity']))
+
+    summary_items.append(("After all masks combined", n_final))
+
+    for label, value in summary_items:
+        perc = (value / total_events * 100) if total_events > 0 else 0
+        print(f"  {label:<50}: {value:6d} ({perc:5.2f}%)")
+
+    print("=" * 60)
 
     return arrays, counters
 
