@@ -65,36 +65,80 @@ def compute_trig_count_mask(tree):
     return trig_count_mask, count
 
 
-def compute_one_hough_zero_comb_mask(tree):
+def compute_x0_multiplicity_mask(tree, x0_count):
     """
-    Compute one_hough_zero_comb mask based on multiplicity: x0==1 & x0_m2==0.
+    Compute mask based on x0 multiplicity condition: ak.num(x0) == x0_count.
+
+    Parameters:
+      - tree: uproot tree object
+      - x0_count: desired number of x0 elements
 
     Returns:
-      (one_hough_zero_comb_mask, count)
+      (mask, count)
     """
     x0_full = tree["L2Event/x0"].array(library="ak")
+    x0_multiplicity_mask = ak.num(x0_full) == x0_count
+    count = np.count_nonzero(x0_multiplicity_mask)
+    return x0_multiplicity_mask, count
+
+
+def compute_x0_m2_multiplicity_mask(tree, x0_m2_count):
+    """
+    Compute mask based on x0_m2 multiplicity condition: ak.num(x0_m2) == x0_m2_count.
+
+    Parameters:
+      - tree: uproot tree object
+      - x0_m2_count: desired number of x0_m2 elements
+
+    Returns:
+      (mask, count)
+    """
     x0_m2_full = tree["L2Event/x0_m2"].array(library="ak")
-    one_hough_zero_comb_mask = (ak.num(x0_full) == 1) & (ak.num(x0_m2_full) == 0)
-    count = np.count_nonzero(one_hough_zero_comb_mask)
-    return one_hough_zero_comb_mask, count
+    x0_m2_multiplicity_mask = ak.num(x0_m2_full) == x0_m2_count
+    count = np.count_nonzero(x0_m2_multiplicity_mask)
+    return x0_m2_multiplicity_mask, count
 
 
-def load_and_select_events(input_file, masks_to_apply=None):
+def compute_combined_multiplicity_mask(tree, x0_count, x0_m2_count):
+    """
+    Compute combined mask: ak.num(x0) == x0_count AND ak.num(x0_m2) == x0_m2_count.
+
+    Parameters:
+      - tree: uproot tree object
+      - x0_count: desired number of x0 elements
+      - x0_m2_count: desired number of x0_m2 elements
+
+    Returns:If you would like to see the comparison plot to illustrate the improvement in statistics between Run2 and 3, we can prepare it. Do you need it for a presentation? Or is it just for curiosity?
+      (combined_mask, count)
+    """
+    x0_multiplicity_mask, _ = compute_x0_multiplicity_mask(tree, x0_count)
+    x0_m2_multiplicity_mask, _ = compute_x0_m2_multiplicity_mask(tree, x0_m2_count)
+    combined_mask = x0_multiplicity_mask & x0_m2_multiplicity_mask
+    count = np.count_nonzero(combined_mask)
+    return combined_mask, count
+
+
+def load_and_select_events(input_file, masks_to_apply=None, multiplicity_config=None):
     """
     Open ROOT file and apply selection masks.
 
     Parameters:
       - input_file: path to ROOT file
       - masks_to_apply: optional dict with boolean flags for which masks to apply.
-                        Keys: 'trig', 'trig_count', 'one_hough_zero_comb' (default: all True)
-                        Example: {'trig': True, 'trig_count': False, 'one_hough_zero_comb': True}
+                        Keys: 'trig', 'trig_count', 'x0_multiplicity', 'x0_m2_multiplicity' (default: trig=True, trig_count=True, others=False)
+                        Example: {'trig': True, 'trig_count': True, 'x0_multiplicity': True, 'x0_m2_multiplicity': False}
+      - multiplicity_config: optional dict specifying multiplicity values.
+                        Keys: 'x0_count', 'x0_m2_count' (used only if x0_multiplicity or x0_m2_multiplicity is True)
+                        Example: {'x0_count': 1, 'x0_m2_count': 0}
 
     Returns:
       (arrays, counters_dict)
-      where counters_dict = {'total': N, 'trig': n_trig or None, 'trig_count': n_tc or None, 'one_hough_zero_comb': n_base or None, 'final': n_final}
+      where counters_dict = {'total': N, 'trig': n_trig or None, 'trig_count': n_tc or None, 'x0_multiplicity': n_x0 or None, 'x0_m2_multiplicity': n_x0m2 or None, 'final': n_final}
     """
     if masks_to_apply is None:
-        masks_to_apply = {'trig': True, 'trig_count': True, 'one_hough_zero_comb': True}
+        masks_to_apply = {'trig': True, 'trig_count': True, 'x0_multiplicity': False, 'x0_m2_multiplicity': False}
+    if multiplicity_config is None:
+        multiplicity_config = {'x0_count': 1, 'x0_m2_count': 0}
 
     print(f"🔍 Opening ROOT file: {input_file}")
     with uproot.open(input_file) as f:
@@ -104,7 +148,7 @@ def load_and_select_events(input_file, masks_to_apply=None):
         print(f"Total events in file: {total_events}")
 
         mask = np.ones(total_events, dtype=bool)
-        counters = {'total': total_events, 'trig': None, 'trig_count': None, 'one_hough_zero_comb': None}
+        counters = {'total': total_events, 'trig': None, 'trig_count': None, 'x0_multiplicity': None, 'x0_m2_multiplicity': None}
 
         # --- Trigger mask ---
         if masks_to_apply.get('trig', True):
@@ -124,14 +168,25 @@ def load_and_select_events(input_file, masks_to_apply=None):
             )
             mask = mask & trig_count_mask
 
-        # --- one_hough_zero_comb mask ---
-        if masks_to_apply.get('one_hough_zero_comb', True):
-            one_hough_zero_comb_mask, n_base = compute_one_hough_zero_comb_mask(tree)
-            counters['one_hough_zero_comb'] = n_base
+        # --- x0 multiplicity mask ---
+        if masks_to_apply.get('x0_multiplicity', False):
+            x0_count = multiplicity_config.get('x0_count', 1)
+            x0_multiplicity_mask, n_x0 = compute_x0_multiplicity_mask(tree, x0_count)
+            counters['x0_multiplicity'] = n_x0
             print(
-                f"Events after one_hough_zero_comb_mask (x0==1 & x0_m2==0): {n_base} ({n_base / total_events * 100:.2f}%)"
+                f"Events after x0_multiplicity_mask (x0=={x0_count}): {n_x0} ({n_x0 / total_events * 100:.2f}%)"
             )
-            mask = mask & one_hough_zero_comb_mask
+            mask = mask & x0_multiplicity_mask
+
+        # --- x0_m2 multiplicity mask ---
+        if masks_to_apply.get('x0_m2_multiplicity', False):
+            x0_m2_count = multiplicity_config.get('x0_m2_count', 0)
+            x0_m2_multiplicity_mask, n_x0_m2 = compute_x0_m2_multiplicity_mask(tree, x0_m2_count)
+            counters['x0_m2_multiplicity'] = n_x0_m2
+            print(
+                f"Events after x0_m2_multiplicity_mask (x0_m2=={x0_m2_count}): {n_x0_m2} ({n_x0_m2 / total_events * 100:.2f}%)"
+            )
+            mask = mask & x0_m2_multiplicity_mask
 
         # --- Branch loading (only for selected events) ---
         branches = [
@@ -158,8 +213,10 @@ def load_and_select_events(input_file, masks_to_apply=None):
         print(f"  After trig_mask:                            {counters['trig']}")
     if counters['trig_count'] is not None:
         print(f"  After trig_count_mask:                      {counters['trig_count']}")
-    if counters['one_hough_zero_comb'] is not None:
-        print(f"  After one_hough_zero_comb_mask (x0==1 & x0_m2==0):         {counters['one_hough_zero_comb']}")
+    if counters['x0_multiplicity'] is not None:
+        print(f"  After x0_multiplicity_mask:                 {counters['x0_multiplicity']}")
+    if counters['x0_m2_multiplicity'] is not None:
+        print(f"  After x0_m2_multiplicity_mask:              {counters['x0_m2_multiplicity']}")
     print(f"  After all masks combined:                    {n_final}")
     print("--------------------------------------------------")
 

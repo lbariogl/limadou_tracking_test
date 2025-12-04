@@ -303,10 +303,20 @@ def extract_selected_info(input_file, output_dir, save_tree=False):
     masks_to_apply = {
         'trig': False,
         'trig_count': True,
-        'one_hough_zero_comb': True,
+        'x0_multiplicity': True,
+        'x0_m2_multiplicity': True,
     }
 
-    arrays, counters = load_and_select_events(input_file, masks_to_apply=masks_to_apply)
+    multiplicity_config = {
+        'x0_count': 1,
+        'x0_m2_count': 0,
+    }
+
+    arrays, counters = load_and_select_events(
+        input_file,
+        masks_to_apply=masks_to_apply,
+        multiplicity_config=multiplicity_config
+    )
 
     os.makedirs(output_dir, exist_ok=True)
     base_name = os.path.splitext(os.path.basename(input_file))[0]
